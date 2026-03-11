@@ -192,6 +192,7 @@ struct adc_stm32_data {
 #ifdef CONFIG_ADC_STM32_DMA
 	volatile int dma_error;
 	struct stream dma;
+	bool fast_bulk;
 #endif
 };
 
@@ -255,7 +256,11 @@ static int adc_stm32_dma_start(const struct device *dev, void *buffer, size_t ch
 	blk_cfg = &dma->dma_blk_cfg;
 
 	/* prepare the block */
-	blk_cfg->block_size = channel_count * sizeof(adc_data_size_t);
+	if (data->fast_bulk) {
+		blk_cfg->block_size = data->ctx.sequence.buffer_size;
+	} else {
+		blk_cfg->block_size = channel_count * sizeof(adc_data_size_t);
+	}
 
 	/* Source and destination */
 	blk_cfg->source_address = (uint32_t)LL_ADC_DMA_GetRegAddr(adc, LL_ADC_DMA_REG_REGULAR_DATA);
@@ -769,14 +774,21 @@ static void dma_callback(const struct device *dev, void *user_data, uint32_t cha
 		}
 #endif /* !DT_HAS_COMPAT_STATUS_OKAY(st_stm32f1_adc) */
 		if (status >= 0) {
-			data->samples_count = data->channel_count;
-			data->buffer += data->channel_count;
-			/* Stop the DMA engine, only to start it again when the callback returns
-			 * ADC_ACTION_REPEAT or ADC_ACTION_CONTINUE, or the number of samples
-			 * haven't been reached Starting the DMA engine is done
-			 * within adc_context_start_sampling
-			 */
 			dma_stop(data->dma.dma_dev, data->dma.channel);
+			if (data->fast_bulk) {
+				/* Bulk transfer done – stop ADC continuous mode */
+#if !DT_HAS_COMPAT_STATUS_OKAY(st_stm32f1_adc) && !DT_HAS_COMPAT_STATUS_OKAY(st_stm32f4_adc)
+				LL_ADC_REG_StopConversion(adc);
+#endif
+				LL_ADC_REG_SetContinuousMode(adc, LL_ADC_REG_CONV_SINGLE);
+				data->buffer +=
+					data->ctx.sequence.buffer_size / sizeof(adc_data_size_t);
+				data->samples_count = data->channel_count;
+				data->ctx.sampling_index = data->ctx.options.extra_samplings;
+			} else {
+				data->samples_count = data->channel_count;
+				data->buffer += data->channel_count;
+			}
 			/* No need to invalidate the cache because it's assumed that
 			 * the address is in a non-cacheable SRAM region.
 			 */
@@ -1002,6 +1014,17 @@ static void adc_context_start_sampling(struct adc_context *ctx)
 	data->repeat_buffer = data->buffer;
 
 #ifdef CONFIG_ADC_STM32_DMA
+	/* When extra_samplings > 0 and interval_us == 0, use a single bulk
+	 * DMA transfer with ADC in continuous conversion mode.  This avoids
+	 * per-sample DMA restart overhead and reaches the full hardware rate.
+	 */
+	if (ctx->sequence.options && ctx->options.extra_samplings > 0 &&
+	    ctx->options.interval_us == 0) {
+		data->fast_bulk = true;
+		LL_ADC_REG_SetContinuousMode(adc, LL_ADC_REG_CONV_CONTINUOUS);
+	} else {
+		data->fast_bulk = false;
+	}
 #if DT_HAS_COMPAT_STATUS_OKAY(st_stm32f4_adc)
 	/* Make sure DMA bit of ADC register CR2 is set to 0 before starting a DMA transfer */
 	LL_ADC_REG_SetDMATransfer(adc, LL_ADC_REG_DMA_TRANSFER_NONE);
