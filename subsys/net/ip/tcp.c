@@ -1609,6 +1609,10 @@ static int tcp_out_ext(struct tcp *conn, uint8_t flags, struct net_pkt *data,
 
 	if (flags & ACK) {
 		conn->recv_win_sent = conn->recv_win;
+		/* This segment ACKs all the data received so far, so a
+		 * delayed ACK still pending would only repeat it.
+		 */
+		k_work_cancel_delayable(&conn->ack_timer);
 	}
 
 	if (is_destination_local(pkt)) {
