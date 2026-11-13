@@ -960,6 +960,12 @@ struct ifreq {
 #define TCP_KEEPINTVL 3
 /** Number of keepalives before dropping connection */
 #define TCP_KEEPCNT 4
+/**
+ * ACK received data with PSH set immediately (1, the default), or delay the
+ * ACK like for other data (0), so that a reply sent within the delay carries
+ * it. Unlike Linux, the setting stays until it is changed again.
+ */
+#define TCP_QUICKACK 12
 
 /** @} */
 

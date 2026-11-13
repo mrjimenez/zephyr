@@ -1425,6 +1425,36 @@ static int get_tcp_nodelay(struct tcp *conn, void *value, uint32_t *len)
 	return 0;
 }
 
+static int set_tcp_quickack(struct tcp *conn, const void *value, uint32_t len)
+{
+	int quickack;
+
+	if (len != sizeof(int)) {
+		return -EINVAL;
+	}
+
+	quickack = *(int *)value;
+
+	if ((quickack < 0) || (quickack > 1)) {
+		return -EINVAL;
+	}
+
+	conn->delay_psh_ack = (quickack == 0);
+
+	return 0;
+}
+
+static int get_tcp_quickack(struct tcp *conn, void *value, uint32_t *len)
+{
+	*((int *)value) = conn->delay_psh_ack ? 0 : 1;
+
+	if (len) {
+		*len = sizeof(int);
+	}
+
+	return 0;
+}
+
 static int net_tcp_set_mss_opt(struct tcp *conn, struct net_pkt *pkt)
 {
 	NET_PKT_DATA_ACCESS_DEFINE(mss_opt_access, struct tcp_mss_option);
@@ -2198,6 +2228,7 @@ static struct tcp *tcp_conn_alloc(void)
 	conn->send_win_max = MAX(tcp_tx_window, NET_IPV6_MTU);
 	conn->send_win = conn->send_win_max;
 	conn->tcp_nodelay = false;
+	conn->delay_psh_ack = false;
 	conn->addr_ref_done = false;
 #ifdef CONFIG_NET_TCP_FAST_RETRANSMIT
 	conn->dup_ack_cnt = 0;
@@ -2832,7 +2863,7 @@ static enum net_verdict tcp_data_received(struct tcp *conn, struct net_pkt *pkt,
 	/* Delay ACK response in case of small window or missing PSH,
 	 * as described in RFC 813.
 	 */
-	if (tcp_short_window(conn) || !psh) {
+	if (tcp_short_window(conn) || !psh || conn->delay_psh_ack) {
 		k_work_schedule_for_queue(&tcp_work_q, &conn->ack_timer,
 					  ACK_DELAY);
 	} else {
@@ -4686,6 +4717,9 @@ int net_tcp_set_option(struct net_context *context,
 	case TCP_OPT_KEEPCNT:
 		ret = set_tcp_keep_cnt(conn, value, len);
 		break;
+	case TCP_OPT_QUICKACK:
+		ret = set_tcp_quickack(conn, value, len);
+		break;
 	}
 
 	k_mutex_unlock(&conn->lock);
@@ -4722,6 +4756,9 @@ int net_tcp_get_option(struct net_context *context,
 		break;
 	case TCP_OPT_KEEPCNT:
 		ret = get_tcp_keep_cnt(conn, value, len);
+		break;
+	case TCP_OPT_QUICKACK:
+		ret = get_tcp_quickack(conn, value, len);
 		break;
 	}
 
