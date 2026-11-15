@@ -320,6 +320,7 @@ struct adc_sub_stm32_data {
 #ifdef CONFIG_ADC_STM32_DMA
 	volatile int dma_error;
 	struct stream dma;
+	bool bulk;
 #endif
 #ifdef CONFIG_ADC_STREAM
 	struct rtio_iodev_sqe *sqe;
@@ -461,6 +462,34 @@ static void adc_stm32_enable_dma_transfer(ADC_TypeDef *adc)
 #else
 	/* Default mechanism for other MCUs */
 	LL_ADC_REG_SetDMATransfer(adc, LL_ADC_REG_DMA_TRANSFER_LIMITED);
+#endif
+}
+
+/*
+ * Bulk mode: when a sequence asks for extra samplings with no interval between
+ * them, the ADC runs in continuous mode and a single DMA transfer fills the
+ * whole buffer, instead of one DMA transfer and one conversion start per
+ * sampling. This reaches the conversion rate of the hardware. The sequence
+ * callback is then called once, when the whole buffer is full.
+ *
+ * Not available on F1 and F4: writing CR2 to change the continuous mode can
+ * start a conversion on F1, and neither has ADSTP to stop the conversions.
+ */
+#if !DT_HAS_COMPAT_STATUS_OKAY(st_stm32f1_adc) && !DT_HAS_COMPAT_STATUS_OKAY(st_stm32f4_adc)
+#define ADC_STM32_HAS_BULK_DMA 1
+#endif
+
+static bool adc_stm32_use_bulk(const struct adc_context *ctx, uint8_t channel_count)
+{
+#ifdef ADC_STM32_HAS_BULK_DMA
+	/* The DMA counts at most UINT16_MAX data items in a single transfer */
+	return (ctx->sequence.options != NULL) && (ctx->options.extra_samplings > 0U) &&
+	       (ctx->options.interval_us == 0U) &&
+	       ((1U + ctx->options.extra_samplings) * channel_count <= UINT16_MAX);
+#else
+	ARG_UNUSED(ctx);
+	ARG_UNUSED(channel_count);
+	return false;
 #endif
 }
 
@@ -1086,6 +1115,19 @@ static void dma_callback(const struct device *dev, void *user_data,
 	LOG_DBG("dma callback");
 
 	if (channel == data->dma.channel) {
+#ifdef ADC_STM32_HAS_BULK_DMA
+		if (data->bulk) {
+			/* Stop the continuous conversions first, so that the samples
+			 * converted after the end of the transfer are not reported as
+			 * an overrun.
+			 */
+			LL_ADC_REG_StopConversion(adc);
+			while (LL_ADC_REG_IsStopConversionOngoing(adc) != 0UL) {
+			}
+			LL_ADC_REG_SetContinuousMode(adc, LL_ADC_REG_CONV_SINGLE);
+			LL_ADC_ClearFlag_OVR(adc);
+		}
+#endif /* ADC_STM32_HAS_BULK_DMA */
 #if !DT_HAS_COMPAT_STATUS_OKAY(st_stm32f1_adc)
 		if (LL_ADC_IsActiveFlag_OVR(adc)) {
 			LL_ADC_ClearFlag_OVR(adc);
@@ -1093,7 +1135,14 @@ static void dma_callback(const struct device *dev, void *user_data,
 				"increase prescaler value or increase sampling times.");
 		}
 #endif /* !DT_HAS_COMPAT_STATUS_OKAY(st_stm32f1_adc) */
-		if (status >= 0) {
+		if (status >= 0 && data->bulk) {
+			dma_stop(data->dma.dma_dev, data->dma.channel);
+			data->samples_count = data->channel_count;
+			data->buffer += data->channel_count * (1U + data->ctx.options.extra_samplings);
+			/* The whole sequence is done: the next step finishes it */
+			data->ctx.sampling_index = data->ctx.options.extra_samplings;
+			adc_context_on_sampling_done(&data->ctx, dev);
+		} else if (status >= 0) {
 			data->samples_count = data->channel_count;
 			data->buffer += data->channel_count;
 			/* Stop the DMA engine, only to start it again when the callback returns
@@ -1707,7 +1756,16 @@ static void adc_context_start_sampling(struct adc_context *ctx)
 	/* Make sure DMA bit of ADC register CR2 is set to 0 before starting a DMA transfer */
 	adc_stm32_disable_dma_transfer(adc);
 #endif
-	adc_stm32_dma_start(dev, data->buffer, data->channel_count);
+	data->bulk = adc_stm32_use_bulk(ctx, data->channel_count);
+	if (data->bulk) {
+#ifdef ADC_STM32_HAS_BULK_DMA
+		LL_ADC_REG_SetContinuousMode(adc, LL_ADC_REG_CONV_CONTINUOUS);
+#endif
+		adc_stm32_dma_start(dev, data->buffer,
+				    data->channel_count * (1U + ctx->options.extra_samplings));
+	} else {
+		adc_stm32_dma_start(dev, data->buffer, data->channel_count);
+	}
 #endif
 	adc_stm32_start_conversion(dev);
 }
