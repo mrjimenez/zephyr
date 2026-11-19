@@ -375,6 +375,25 @@ static int eth_xmc4xxx_send(const struct device *dev, struct net_pkt *pkt)
 	int num_frags = 0;
 	bool first_descriptor = false;
 
+	/* Due to checksum offloading, the checksum field must be zero before
+	 * sending the packet to the ethernet controller, otherwise the computed
+	 * checksum will be incorrect.
+	 *
+	 * If the packet is bridged, it already has the correct checksum in
+	 * place, which will cause the automatically computed checksum to
+	 * incorrectly become zero.
+	 *
+	 * Here we give bridged packets the special attention they need. This
+	 * is done before any frame or DMA descriptor is taken, so that a
+	 * failure here can return without leaking them.
+	 */
+	if (net_pkt_is_l2_bridged(pkt)) {
+		ret = eth_xmc4xxx_clear_checksum(pkt);
+		if (ret) {
+			return ret;
+		}
+	}
+
 	frag = pkt->frags;
 	while (frag) {
 		num_frags++;
@@ -468,23 +487,6 @@ static int eth_xmc4xxx_send(const struct device *dev, struct net_pkt *pkt)
 #endif
 		LOG_DBG("Dropping frame. Buffered Tx frames were flushed in ISR.");
 		return -EIO;
-	}
-
-	/* Due to checksum offloading, the checksum field must be zero before
-	 * sending the packet to the ethernet controller, otherwise the computed
-	 * checksum will be incorrect.
-	 *
-	 * If the packet is bridged, it already has the correct checksum in
-	 * place, which will cause the automatically computed checksum to
-	 * incorrectly become zero.
-	 *
-	 * Here we give bridged packets the special attention they need.
-	 */
-	if (net_pkt_is_l2_bridged(pkt)) {
-		ret = eth_xmc4xxx_clear_checksum(pkt);
-		if (ret) {
-			return ret;
-		}
 	}
 
 	unsigned int key = irq_lock();
